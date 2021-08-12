@@ -1,0 +1,7 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+MAILTO=""
+HOME=/root/setup
+BOX_NAME=${box_name}
+@reboot root sleep 30; mkdir -p /root/setup ; cd /root/setup && aws s3 cp s3://${SERVICE_ASSETS_BUCKET}/scripts/common_functions.sh common_functions.sh ; source /root/setup/common_functions.sh ; handle_restart ; run_one_offs
+

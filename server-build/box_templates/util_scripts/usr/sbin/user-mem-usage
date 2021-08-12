@@ -1,0 +1,4 @@
+#!/bin/bash
+for _user in $(ps haux | awk '{print $1}' | sort -u); do
+  ps haux | awk -v user=${_user} '$1 ~ user { sum += $4} END { print user, sum; }'
+done

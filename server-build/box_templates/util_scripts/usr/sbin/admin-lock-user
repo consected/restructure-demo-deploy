@@ -1,0 +1,10 @@
+#!/bin/bash
+username=$1
+if [ -z ${username} ]; then
+  echo "usage: sudo admin-lock-user <username>"
+  exit
+fi
+
+usermod -L ${username}
+chage -E0 ${username}
+usermod -s /sbin/nologin ${username}

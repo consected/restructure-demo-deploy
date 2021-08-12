@@ -1,0 +1,5 @@
+set smtp-use-starttls
+set smtp-auth=login
+set smtp=smtp://email-smtp.us-east-1.amazonaws.com:587
+set smtp-auth-user=${smtp_username}
+set smtp-auth-password=${smtp_password}

@@ -1,0 +1,10 @@
+#!/bin/bash
+username=$1
+if [ -z ${username} ]; then
+  echo "usage: sudo kill-user-processes <username>"
+  exit
+fi
+
+touch /etc/user_configs/kill-user-processes/${username}
+
+echo "Within the next 15 minutes this user's processes will be reset and they can login again to restart their session"

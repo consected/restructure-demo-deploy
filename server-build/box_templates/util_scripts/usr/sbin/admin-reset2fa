@@ -1,0 +1,10 @@
+#!/bin/bash
+username=$1
+if [ -z ${username} ]; then
+  echo "usage: sudo admin-reset2fa <username>"
+  exit
+fi
+
+touch /etc/user_configs/reset2fa/${username}
+
+echo "Within the next 15 minutes this user's 2FA will be reset and they can login again and set up a new code"
