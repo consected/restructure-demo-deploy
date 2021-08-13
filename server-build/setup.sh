@@ -1,6 +1,6 @@
 #!/bin/bash
 
-cd /root/restructure-build
+cd /root/restructure-demo-deploy
 SETUP_DIR=/root/setup
 mkdir -p ${SETUP_DIR}
 cp -r server-build ${SETUP_DIR}
