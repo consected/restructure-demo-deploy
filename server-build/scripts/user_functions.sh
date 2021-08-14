@@ -6,7 +6,8 @@ function init_user_configs() {
   rm -rf ${USER_CONFIGS_DIR}
   mkdir -p ${USER_CONFIGS_DIR}
 
-  aws s3 cp --only-show-errors s3://${SERVICE_ASSETS_BUCKET}/user_configs/${box_name}/ ${USER_CONFIGS_DIR}/ --recursive
+  # aws s3 cp --only-show-errors s3://${SERVICE_ASSETS_BUCKET}/user_configs/${box_name}/ ${USER_CONFIGS_DIR}/ --recursive
+  cp -r ${SETUP_DIR}/user_configs/ ${USER_CONFIGS_DIR}/
 
   setup_sudoers
   setup_users
@@ -47,7 +48,8 @@ function refresh_users() {
   # Now go ahead and pull the new configurations
   rm -rf ${USER_CONFIGS_DIR}_tmp
   mkdir -p ${USER_CONFIGS_DIR}_tmp
-  aws s3 cp --only-show-errors s3://${SERVICE_ASSETS_BUCKET}/user_configs/${BOX_NAME}/ ${USER_CONFIGS_DIR}_tmp/ --recursive
+  # aws s3 cp --only-show-errors s3://${SERVICE_ASSETS_BUCKET}/user_configs/${BOX_NAME}/ ${USER_CONFIGS_DIR}_tmp/ --recursive
+  cp -r ${SETUP_DIR}/user_configs/ ${USER_CONFIGS_DIR}_tmp/
 
   if [ ! -z "$(ls ${USER_CONFIGS_DIR}_tmp)" ]; then
     rm -rf ${USER_CONFIGS_DIR}
@@ -288,75 +290,6 @@ function is_user_master() {
   fi
 }
 
-# Compare configured passwords with current entries in the shadow file
-# For those where the current password is newer, send it to s3
-function send_users_to_s3() {
-
-  if [ "$(is_user_master)" != master ]; then
-    return
-  fi
-
-  log_function $@
-
-  mkdir -p ${CENTRAL_PW_DIR}
-  chmod 770 ${CENTRAL_PW_DIR}
-  log INFO "Got files: $(ls ${CENTRAL_PW_DIR} | wc -l)"
-
-  for uname in $(list_setup_users); do
-    cd ${CENTRAL_PW_DIR}
-    unset ufile
-    unset configpw
-    unset configpwdate
-    unset currpw
-    unset currpwdate
-    unset diffpw
-
-    # Get the user's current password entry into variable currpw
-    # Put the last password change date from the file into variable currpwdate
-    # If the currpwdate is blank (the user is not a login user and has never
-    # updated the password for example) then set the currpwdate to 0
-    local currpw=$(getent shadow ${uname})
-    if [ "${currpw}" ]; then
-      local currpwdate=$(echo "${currpw}" | awk -F: '{print $3}')
-    fi
-    local currpwdate="${currpwdate:=0}"
-
-    # Check for a /etc/central_passwords file for the user
-    # If one exists, put the password entry from that file into variable configpw
-    # and the last password change date into the variable configpwdate.
-    local ufile="${CENTRAL_PW_DIR}/${uname}"
-    if [ -f "${uname}" ]; then
-      local configpw=$(cat "${ufile}")
-    fi
-
-    if [ "${configpw}" ]; then
-      local configpwdate=$(echo "${configpw}" | awk -F: '{print $3}')
-    fi
-    local configpwdate="${configpwdate:=0}"
-
-    # If the current password date is more recent (or the same) as the config password date
-    # and the password entries do not match, then update the central file
-    # Otherwise, if the current password is set, but there was no config, create an entry.
-    if [ "${currpw}" ] && [ "${configpw}" ] && [ "${currpwdate}" -ge "${configpwdate}" ] && [ "${currpw}" != "${configpw}" ]; then
-      # A password has been updated, copy it to the configuration file
-      echo "${currpw}" > "${ufile}"
-      log INFO "send_users_to_s3: has been updated - ${uname}"
-    elif [ "${currpw}" ] && [ ! "${configpw}" ]; then
-      # A password does not exist centrally yet, copy it to the configuration file
-      echo "${currpw}" > "${ufile}"
-      log INFO "send_users_to_s3: has been created - ${uname}"
-    fi
-
-  done
-
-  # Sync all updated password configuration up to a common S3
-  # bucket/user_configs/passwords folder
-  cd /etc
-  aws s3 cp --recursive central_passwords/ s3://${SERVICE_ASSETS_BUCKET}/user_configs/passwords/ --exclude=".*"
-  cd -
-
-  log INFO "send_users_to_s3: done"
-}
 
 # Get the central password file path for a username (first argument)
 # ensuring the result is renamed to the simple username, not
@@ -377,7 +310,8 @@ function get_central_password_file() {
       rm -f ${CENTRAL_PW_DIR}/${uname}
       rm -f ${CENTRAL_PW_DIR}/${uname},*
       # Retrieve the file and return the new path/filename
-      aws s3 cp --only-show-errors s3://${SERVICE_ASSETS_BUCKET}/user_configs/passwords/${uname} ${CENTRAL_PW_DIR}/${uname}
+      # aws s3 cp --only-show-errors s3://${SERVICE_ASSETS_BUCKET}/user_configs/passwords/${uname} ${CENTRAL_PW_DIR}/${uname}
+      cp -r ${SETUP_DIR}/user_configs/passwords/${uname} ${CENTRAL_PW_DIR}/${uname}
     fi
 
     # Whether the file has been retrieved right now, or previously as a bulk action,
@@ -394,7 +328,9 @@ function get_all_central_password_files() {
   mkdir -p ${CENTRAL_PW_DIR}
   chmod 770 ${CENTRAL_PW_DIR}
 
-  aws s3 sync --exact-timestamps s3://${SERVICE_ASSETS_BUCKET}/user_configs/passwords/ ${CENTRAL_PW_DIR}/
+  # aws s3 sync --exact-timestamps s3://${SERVICE_ASSETS_BUCKET}/user_configs/passwords/ ${CENTRAL_PW_DIR}/
+  cp -r ${SETUP_DIR}/user_configs/passwords/ ${CENTRAL_PW_DIR}/
+  
   local numres=$(ls ${CENTRAL_PW_DIR} | wc -l)
   if [ $numres == 0 ]; then
     SYNC_CENTRAL_PASSWORD_FILES_ONCE=false
@@ -454,8 +390,6 @@ function setup_users() {
       fi
     done
   fi
-
-  send_users_to_s3
 
   run_admin_actions
 
