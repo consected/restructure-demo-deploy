@@ -1,0 +1,7 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+MAILTO=""
+HOME=/root/setup
+BOX_NAME=${box_name}
+16 4 * * * root mkdir -p /root/setup ; cd /root/setup && aws s3 cp s3://${SERVICE_ASSETS_BUCKET}/scripts/common_functions.sh common_functions.sh ; source /root/setup/common_functions.sh ; get_source setup_certbot_docker.sh ; certbot_issue_certificate ${INTERNAL_HOSTNAME} ${EXTERNAL_HOSTNAME}
+

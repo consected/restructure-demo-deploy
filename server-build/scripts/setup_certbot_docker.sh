@@ -67,6 +67,7 @@ function certbot_issue_certificate() {
       --dns-route53 \
       --email phil.ayres@consected.com \
       --domains ${INT_DOMAIN} ${ext_domain_flag} \
+      --dns-route53-propagation-seconds	20 \
       --agree-tos \
       --keep-until-expiring \
       --force-renewal
