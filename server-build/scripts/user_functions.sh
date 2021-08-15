@@ -7,7 +7,7 @@ function init_user_configs() {
   mkdir -p ${USER_CONFIGS_DIR}
 
   # aws s3 cp --only-show-errors s3://${SERVICE_ASSETS_BUCKET}/user_configs/${box_name}/ ${USER_CONFIGS_DIR}/ --recursive
-  cp -r ${SETUP_DIR}/user_configs/ ${USER_CONFIGS_DIR}/
+  cp -r ${SETUP_DIR}/user_configs/* ${USER_CONFIGS_DIR}/
 
   setup_sudoers
   setup_users
@@ -49,7 +49,7 @@ function refresh_users() {
   rm -rf ${USER_CONFIGS_DIR}_tmp
   mkdir -p ${USER_CONFIGS_DIR}_tmp
   # aws s3 cp --only-show-errors s3://${SERVICE_ASSETS_BUCKET}/user_configs/${BOX_NAME}/ ${USER_CONFIGS_DIR}_tmp/ --recursive
-  cp -r ${SETUP_DIR}/user_configs/ ${USER_CONFIGS_DIR}_tmp/
+  cp -r ${SETUP_DIR}/user_configs/* ${USER_CONFIGS_DIR}_tmp/
 
   if [ ! -z "$(ls ${USER_CONFIGS_DIR}_tmp)" ]; then
     rm -rf ${USER_CONFIGS_DIR}
@@ -329,8 +329,8 @@ function get_all_central_password_files() {
   chmod 770 ${CENTRAL_PW_DIR}
 
   # aws s3 sync --exact-timestamps s3://${SERVICE_ASSETS_BUCKET}/user_configs/passwords/ ${CENTRAL_PW_DIR}/
-  cp -r ${SETUP_DIR}/user_configs/passwords/ ${CENTRAL_PW_DIR}/
-  
+  cp -r ${SETUP_DIR}/user_configs/passwords/* ${CENTRAL_PW_DIR}/
+
   local numres=$(ls ${CENTRAL_PW_DIR} | wc -l)
   if [ $numres == 0 ]; then
     SYNC_CENTRAL_PASSWORD_FILES_ONCE=false
