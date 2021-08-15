@@ -93,7 +93,7 @@ function certbot_issue_certificate() {
 
 function certbot_issued_reboot_services() {
   log_function $@
-  local services='httpd passenger vpnserver'
+  local services='httpd passenger nginx web vpnserver'
   for svc in ${services}; do
     if [ "$(service_enabled ${svc})" ] && [ -z "$(service_not_running ${svc})" ]; then
       log INFO "Restarting service ${svc} after certbot issued certificate"
