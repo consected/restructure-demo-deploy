@@ -1,7 +1,7 @@
 #!/bin/bash
 BOX_NAME=restructure-demo
-HOSTNAME=restructure.consected.com
-EXTERNAL_HOSTNAME=restructure.consected.com
+HOSTNAME=restructure-demo.consected.com
+EXTERNAL_HOSTNAME=restructure-demo.consected.com
 
 AWS_ACCT=012511364329
 AWS_REGION=us-east-1
