@@ -1,66 +1,119 @@
 #!/bin/bash
 
+# Initialize the user configurations when the box is built
 function init_user_configs() {
   log_function $@
   local box_name=$1
-  rm -rf ${USER_CONFIGS_DIR}
-  mkdir -p ${USER_CONFIGS_DIR}
 
-  # aws s3 cp --only-show-errors s3://${SERVICE_ASSETS_BUCKET}/user_configs/${box_name}/ ${USER_CONFIGS_DIR}/ --recursive
-  cp -r ${SETUP_DIR}/user_configs/* ${USER_CONFIGS_DIR}/
-
-  setup_sudoers
-  setup_users
-  setup_ssh_keys
-  disable_root_login_ssh
-  setup_user_refresh
   # If we have a centrally stored shadow file, use it
-  shadow_get_user_db
+  get_stored_users
+
+  # Allow wheel group users to sudo, without a password
+  setup_sudoers
+  setup_box_groups
+
+  setup_sysadmin_users
+  setup_cron_user_refresh
 }
 
+# Setup a cron.d entry to rerun user setup every 15 minutes
+function setup_cron_user_refresh() {
+  log_function $@
+  local group=setup_users
+  local template_path=${CRON_DIR}/refreshusers
+  # See if there is a box specific version
+  init_templates ${group} ${BOX_NAME}
+  if [ ! $(template_exists ${group} ${template_path}) ]; then
+    init_templates ${group}
+  fi
+  box_name=${BOX_NAME} SERVICE_ASSETS_BUCKET=${SERVICE_ASSETS_BUCKET} user_base_dirs=${USER_BASE_DIRS} use_template setup_users ${template_path}
 
-function shadow_save_user_db() {
+}
+
+# Save the current /etc/shadow password file to the box store, as a backup.
+# This should be called after any user updates and periodically
+function store_users() {
   log_function $@
   save_to_box_store /etc/shadow
+  save_to_box_store /etc/passwd
 }
 
-function shadow_get_user_db() {
+# Restore the /etc/shadow password file from the box store. Typically
+# used when a box is created.
+function get_stored_users() {
   log_function $@
-
   get_from_box_store /etc/shadow
-
+  chown root:root /etc/shadow
+  chmod 600 /etc/shadow
+  get_from_box_store /etc/passwd
+  chown root:root /etc/passwd
+  chmod 644 /etc/passwd
   add_status
 }
 
-# Refresh users from S3 configurations
-# Typically called from cron job
-# Call with noreplace as the first argument if desired to
-# pass this to setup_users
+# Save the current /etc/group file to the box store, as a backup.
+# This should be called after any user updates and periodically
+function store_groups() {
+  log_function $@
+  save_to_box_store /etc/group
+}
+
+# Restore the /etc/group file from the box store. Typically
+# used when a box is created.
+function get_stored_groups() {
+  log_function $@
+  get_from_box_store /etc/group
+  chown root:root /etc/group
+  chmod 644 /etc/group
+  add_status
+}
+
+# Save the IAM user list to the box store.
+# This should be called after any user updates and periodically
+function store_iam_users() {
+  log_function $@
+  save_to_box_store ${IAM_USERS_FILE}
+}
+
+# Restore the IAM user list file from the box store.
+function get_stored_iam_users() {
+  log_function $@
+  get_from_box_store ${IAM_USERS_FILE}
+  if [ -f ${IAM_USERS_FILE} ]; then
+    chown root:root ${IAM_USERS_FILE}
+    chmod 644 ${IAM_USERS_FILE}
+    cat ${IAM_USERS_FILE}
+  else
+    log INFO "No IAM users file retrieved to: ${IAM_USERS_FILE}"
+  fi
+}
+
+# Refresh users from IAM
+# Typically called frequently from a cron job
 function refresh_users() {
   log_function $@
 
-  local noreplace=$1
+  setup_sysadmin_users
+  if [ $? == 0 ]; then
 
-  # Before using the uploaded configurations, handle any existing
-  # request, etc in the user configurations directories
-  reset_google_auths
+    run_touched_admin_files
+    store_users
+    store_groups
 
-  # Now go ahead and pull the new configurations
-  rm -rf ${USER_CONFIGS_DIR}_tmp
-  mkdir -p ${USER_CONFIGS_DIR}_tmp
-  # aws s3 cp --only-show-errors s3://${SERVICE_ASSETS_BUCKET}/user_configs/${BOX_NAME}/ ${USER_CONFIGS_DIR}_tmp/ --recursive
-  cp -r ${SETUP_DIR}/user_configs/* ${USER_CONFIGS_DIR}_tmp/
-
-  if [ ! -z "$(ls ${USER_CONFIGS_DIR}_tmp)" ]; then
-    rm -rf ${USER_CONFIGS_DIR}
-    mv ${USER_CONFIGS_DIR}_tmp ${USER_CONFIGS_DIR}
-
-    setup_users ${noreplace}
-    shadow_save_user_db
   else
-    log ERROR "refresh_users failed to get the user_configs/${BOX_NAME} from s3"
+    log ERROR "refresh_users failed"
   fi
 
+}
+
+# Run admin functions based on files existing in USER_CONFIGS_DIR
+# See the scripts in common/templates/all/util_scripts
+function run_touched_admin_files() {
+  disable_users
+  if [ "$(which google-authenticator 2> /dev/null)" ]; then
+    reset_google_auths
+  fi
+  kill_user_processes
 }
 
 # Setup the sudoers based on being a member of the wheel group
@@ -69,13 +122,34 @@ function setup_sudoers() {
   log_function $@
 
   rm -f /etc/sudoers.d/cloud-init
-  echo '%wheel ALL=(ALL) ALL' > /etc/sudoers.d/wheel
+  echo '%wheel ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/wheel
   chmod 0440 /etc/sudoers.d/wheel
 }
 
-function setup_grouplist() {
+# The user configs "grouplist" file lists the OS groups to be set up on all
+# servers. This function adds a group if it doesn't already exist, so it can
+# safely be rerun periodically.
+# The grouplist file has each groupname,gid on its own line. For example:
+# fphsadmi,3000474
+# fphsdata,3000476
+# ...
+function setup_box_groups() {
   log_function $@
-  local glfile=${USER_CONFIGS_DIR}/grouplist
+  local glfile=/etc/grouplist
+
+  # See if there is a box specific version in the templates,
+  # otherwise use the root level template instead
+  local group=setup_users
+  init_templates ${group} ${BOX_NAME}
+  if [ ! $(template_exists ${group} ${glfile}) ]; then
+    init_templates ${group}
+    if [ ! $(template_exists ${group} ${glfile}) ]; then
+      log INFO "No /etc/grouplist for setup_users templates. Returning"
+      return
+    fi
+  fi
+
+  use_template setup_users ${glfile}
 
   if [ ! -f ${glfile} ]; then
     log INFO "No grouplist file ${glfile}"
@@ -99,124 +173,72 @@ function setup_grouplist() {
   add_status
 }
 
-function list_setup_users() {
-  local pwdir=${USER_CONFIGS_DIR}/passwords
-  unset IFS
+# Get sorted list of usernames from iam
+function get_users_from_iam() {
+  log_function $@
 
-  for u in $(ls ${pwdir}); do
-    IFS=','
-    read -a strarr <<< "$u"
-    unset IFS
-    local un="${strarr[0]}"
-    echo ${un}
-  done
-  unset IFS
-}
-
-function list_unlocked_users() {
-  IFS='
-'
-  for uname in $(list_setup_users); do
-    [ ! $(is_user_locked "${uname}") ] && echo $uname
-  done
-  IFS=' '
-}
-
-function is_user_locked() {
-  local user=$1
-  if [ "$(getent shadow ${user})" ] && [ "$(passwd -S ${user} 2> /dev/null | grep locked)" ]; then
-    echo locked
+  local IAM_USERS_FILE=$(mktemp)
+  aws iam get-group --group-name box-admins > ${IAM_USERS_FILE} 2>&1
+  if [ $? != 0 ]; then
+    log ERROR "Failed to get IAM users: $(cat ${IAM_USERS_FILE})"
+    return 255
   fi
+
+  cat ${IAM_USERS_FILE} | grep -E '"UserName": ".+",' | sed -E 's/.+"UserName": "(.+)",/\1/' | sort
+
+  rm -f ${IAM_USERS_FILE}
+
+  log INFO "Got IAM users"
 }
 
-# Get the central password for the user, if one exists.
-# If the central password is newer, then force an update of the user
-# entry in the shadow file.
-# If the user has just been set up, then the password may not be set yet,
-# so just add the entry to the shadow file
-function update_shadow_with_central_password() {
+# For each IAM user in the IAM group box-admins, setup
+# (or refresh the details for) a user
+# For entries in user_configs/disable or user_configs/disable-all
+# disable the users
+# When complete, send the results back to the box store (passwd, shadow and groups)
+# and run admin actions
+function setup_sysadmin_users() {
+  log_function $@
 
-  local uname=$1
-  if [ -z "${uname}" ]; then
-    log ERROR "update_shadow_with_central_password requires username as first argument"
+  groupadd -f ${ADMIN_GROUP}
+
+  local usernames=$(get_users_from_iam)
+  if [ ! "${usernames}" ]; then
+    log ERROR "No users retrieved from IAM. Do not continue"
     return 1
   fi
-  local central_pw_file=$(get_central_password_file ${uname})
 
-  if [ -z "${central_pw_file}" ]; then
-    log WARNING "No central password file was returned for ${uname}"
+  for un in ${usernames}; do
+    setup_user "${un}"
+  done
+
+  local prev_users=$(get_stored_iam_users)
+  if [ "${prev_users}" ]; then
+    # If the user appeared in the old list, but not the new one
+    # then it should be disabled
+    for un in ${prev_users}; do
+      local un_in_usernames=$(echo ${usernames} | grep "\b${un}\b")
+      if [ ! "${un_in_usernames}" ]; then
+        disable_user ${un}
+      else
+        log INFO "User present in stored IAM users file: ${un}"
+      fi
+    done
   else
-
-    # Get the centrally configured password file content
-    local configpw=$(cat "${central_pw_file}")
-    # Get the last updated date for the centrally configured password
-    local configpwdate=$(echo ${configpw} | awk -F: '{print $3}')
-
-    # Get the last updated date for the current shadow file password. If it is not set
-    # for some reason, default it to 0
-    local currpw=$(getent shadow ${uname})
-    local currpwdate=$(echo ${currpw} | awk -F: '{print $3}')
-    currpwdate=${currpwdate:=0}
-
-    # Get the full user/password entry from the central configuration
-    if [ "${configpw}" ]; then
-      # If this is not the user master server, then make the change regardless
-      # Otherwise the password date must be newer and the password must have changed
-      local newer_pw=
-      if [ "${configpwdate}" ] && [ "${configpwdate}" -ge "${currpwdate}" ] && [ "${configpw}" != "${currpw}" ]; then
-        local newer_pw=yes
-      fi
-
-      # log INFO "Shadow for ${uname}: $(getent shadow ${uname})"
-      if [ -z "$(getent shadow ${uname})" ]; then
-        # The shadow file is not yet set, just add the entry
-        echo ${configpw} >> /etc/shadow
-        log INFO "Added new entry to shadow file for ${uname} with central password"
-
-      elif [ "$(is_user_master)" != master ] || [ "${newer_pw}" ]; then
-        # The date of last password update in the central configured password file is
-        # is the same as or newer than the date for the current password,
-        # and the password entries do not match,
-        # so update the current password
-
-        # Escape the $ signs and backslashes
-        local new_pw=$(echo ${configpw} | sed 's/\$/\\$/g' | sed 's/\//\\\//g')
-        sed -i -E "s/^${uname}:.+$/${new_pw}/" /etc/shadow
-
-        log INFO "Updated shadow file for ${uname} with central password"
-      fi
-    fi
+    log INFO "Stored IAM users file was empty"
   fi
+
+  echo ${usernames} > ${IAM_USERS_FILE}
+  store_iam_users
 
 }
 
-# Setup or replace a user
-# setup_user <username> (noreplace) <uid>
-# If the user has a uid, the passwords file will be named "<username>,<uid>"
-# otherwise it will just be "<username>"
+# Setup, disable or replace a user, including groups
 function setup_user() {
   local uname=$1
-  local noreplace=$2
-  local uid=$3
-
-  local gdir=${USER_CONFIGS_DIR}/groups
-  local pwdir=${USER_CONFIGS_DIR}/passwords
-  local disable=${USER_CONFIGS_DIR}/disable
-
-  unset IFS
 
   # Set a variable indicating if the user exists
   local user_exists=$(getent passwd ${uname})
-
-  # If a uid was provided, setup the password filename and
-  # additional arguments for user creation
-  if [ -z "$uid" ]; then
-    local adduseruid=""
-    local pwf=${uname}
-  else
-    local adduseruid="--uid=${uid}"
-    local pwf=${uname},${uid}
-  fi
 
   if [ -z "${user_exists}" ]; then
     local group_exists=$(getent group ${uname})
@@ -225,154 +247,45 @@ function setup_user() {
     else
       local group_arg="-g ${uname}"
     fi
-    adduser ${uname} ${adduseruid} ${group_arg}
-    log INFO "setup_user: Added user ${uname} ${adduseruid} ${group_arg}"
-  fi
 
-  if [ -z "${user_exists}" ] || [ "${noreplace}" != "noreplace" ]; then
-    log INFO "User does not exist (user_exists=${user_exists}) or we are told to replace replace existing one (noreplace=${noreplace}): ${uname} ${uid}"
-
-    # We no longer get passwords from the individual box files, instead using the central password files for the actual password
-    # The existence of the box user_config user just indicates the existence of the user on this box.
-
-    local currid=$(getent passwd ${uname} | awk -F: '{print $3}')
-
-    # If the user existed, has a uid specified and we have asked to replace, set the uid if it is different
-    if [ "${user_exists}" ] && [ "${noreplace}" != "noreplace" ] && [ "${uid}" ] && [ "${currid}" != "${uid}" ]; then
-      usermod -u ${uid} ${uname}
+    local extra_groups=wheel
+    if [ "${ADMIN_GROUP}" ]; then
+      extra_groups=${extra_groups},${ADMIN_GROUP}
     fi
+    adduser ${uname} ${group_arg} -G ${extra_groups}
 
+    if [ $? == 0 ]; then
+      log INFO "setup_user: Added user ${uname}"
+    else
+      log ERROR "setup_user: Failed adding user ${uname}"
+      return 2
+    fi
   fi
 
+  # Set the password
+  echo \"${pw}\" | passwd --stdin ${uname}
   # Set the number of days warning (defaults 14 but override if required)
-  PW_EXP_WARN_DAYS=${PW_EXP_WARN_DAYS:=14}
   chage -W ${PW_EXP_WARN_DAYS} ${uname} 2>&1
 
-  # If the user is not locked or this is not the user master server
-  # update the actual password (shadow file entry)
-  # with the password from the central config file
-  echo "Trying update" > /home/${uname}/common.log
-
-  if [ "$(is_user_locked "${uname}")" != 'locked' ] || [ "$(is_user_master)" != master ]; then
-    echo "Updating" >> /home/${uname}/common.log
-    update_shadow_with_central_password ${uname}
-  fi
-
-  # If the user has a groups file, add each group in it
-  # Note: we don't remove groups that are not in the file, since
-  # other setups add users to groups manually during setup
-  if [ -f "${gdir}/${uname}" ]; then
-    for g in $(cat "${gdir}/${uname}"); do
-      if ! id -nGz "${uname}" | grep -qzxF "$g"; then
-        usermod -aG ${g} ${uname} 2>&1
-        log INFO "Added group ${g} to user ${uname}"
-      fi
-    done
-  fi
-
-  # If the user has not been marked as disabled in the disable or disable-all folders
-  if [ ! -f ${disable}*/${uname} ]; then
-    if [ -z "${user_exists}" ]; then
-      # The user didn't exist. Follow up with post-create actions
-      created_user_actions ${uname}
-    else
-      # The user existed (but may have previously been locked)
-      # Re-enable their account, just in case
-      usermod -U ${uname} 2>&1
-      usermod -s /bin/bash ${uname} 2>&1
-    fi
-  fi
 }
 
-function is_user_master() {
-  if [ "${MASTER_USERS_HOSTNAME}" == $(hostname) ]; then
-    echo master
-  fi
+# Disable user with supplied username
+function disable_user() {
+  local f=$1
+
+  usermod -L ${f} 2>&1
+  chage -E0 ${f} 2>&1
+  usermod -s /sbin/nologin ${f} 2>&1
+  killall -u ${f}
+  log INFO "Disabled user account ${f} and killed all related processes"
 }
 
-
-# Get the central password file path for a username (first argument)
-# ensuring the result is renamed to the simple username, not
-# <username,id> as some might have
-function get_central_password_file() {
+# Disable users that appear in disable and disable-all directories
+# in ${USER_CONFIGS_DIR}/disable or ${USER_CONFIGS_DIR}/disable-all
+function disable_users() {
   log_function $@
 
-  local uname=$1
-
-  mkdir -p ${CENTRAL_PW_DIR}
-  chmod 770 ${CENTRAL_PW_DIR}
-
-  if [ "${uname}" ]; then
-
-    # If we are not retrieving all central password files once at the beginning of the process
-    # then explicitly request this file
-    if [ "${SYNC_CENTRAL_PASSWORD_FILES_ONCE}" != 'true' ]; then
-      rm -f ${CENTRAL_PW_DIR}/${uname}
-      rm -f ${CENTRAL_PW_DIR}/${uname},*
-      # Retrieve the file and return the new path/filename
-      # aws s3 cp --only-show-errors s3://${SERVICE_ASSETS_BUCKET}/user_configs/passwords/${uname} ${CENTRAL_PW_DIR}/${uname}
-      cp -r ${SETUP_DIR}/user_configs/passwords/${uname} ${CENTRAL_PW_DIR}/${uname}
-    fi
-
-    # Whether the file has been retrieved right now, or previously as a bulk action,
-    # check its existence, and if it is present return the file path.
-    if [ -f "${CENTRAL_PW_DIR}/${uname}" ]; then
-      echo "${CENTRAL_PW_DIR}/${uname}"
-    fi
-  fi
-}
-
-function get_all_central_password_files() {
-  log_function $@
-
-  mkdir -p ${CENTRAL_PW_DIR}
-  chmod 770 ${CENTRAL_PW_DIR}
-
-  # aws s3 sync --exact-timestamps s3://${SERVICE_ASSETS_BUCKET}/user_configs/passwords/ ${CENTRAL_PW_DIR}/
-  cp -r ${SETUP_DIR}/user_configs/passwords/* ${CENTRAL_PW_DIR}/
-
-  local numres=$(ls ${CENTRAL_PW_DIR} | wc -l)
-  if [ $numres == 0 ]; then
-    SYNC_CENTRAL_PASSWORD_FILES_ONCE=false
-  fi
-  log INFO "Got central password files: $numres"
-}
-
-# For each item in passwords user_configs/directory, setup
-# (or refresh the details for) a user
-function setup_users() {
-  log_function $@
-
-  local pwdir=${USER_CONFIGS_DIR}/passwords
   local disable=${USER_CONFIGS_DIR}/disable
-
-  local noreplace=$1
-
-  groupadd -f ${ADMIN_GROUP}
-
-  if [ "${noreplace}" != "noreplace" ]; then
-    local noreplace='replace'
-  fi
-
-  setup_grouplist
-  chown :${ADMIN_GROUP} ${USER_CONFIGS_DIR}
-
-  if [ "${SYNC_CENTRAL_PASSWORD_FILES_ONCE}" == 'true' ]; then
-    get_all_central_password_files
-  fi
-
-  unset IFS
-  for f in $(ls ${pwdir}); do
-    IFS=','
-    read -a strarr <<< "$f"
-    unset IFS
-    local un="${strarr[0]}"
-    local uid="${strarr[1]}"
-    setup_user "${un}" "${noreplace}" ${uid}
-
-  done
-  unset IFS
-
   # If a user is listed in a disable directory, remove their access
   if [ -d ${disable} ] || [ -d ${disable}-all ]; then
 
@@ -382,20 +295,18 @@ function setup_users() {
 
     for f in $(ls ${disable}*); do
       if [ "$(is_user_locked "${f}")" != 'locked' ] && [ "$(id ${f} 2> /dev/null)" ]; then
-        usermod -L ${f} 2>&1
-        chage -E0 ${f} 2>&1
-        usermod -s /sbin/nologin ${f} 2>&1
-        killall -u ${f}
-        log INFO "Disabled user account ${f} and killed all related processes"
+        disable_user ${f}
       fi
     done
   fi
 
-  run_admin_actions
-
 }
 
-
+# Kill all user processes for users with a file named the username in
+# ${USER_CONFIGS_DIR}/kill-user-processes
+# This allows the kill-user-processes script to be run by non-root users,
+# entering a file in this directory to be run later, without having to
+# grant full killall privileges
 function kill_user_processes() {
   local killups=${USER_CONFIGS_DIR}/kill-user-processes
   mkdir -p "${killups}"
@@ -431,194 +342,39 @@ function created_user_actions() {
   add_status
 }
 
+### Utilities
 
-##### SSH
+# List users that have been set up as users on the server,
+# although this does not guarantee the user is not locked
+# This finds all users in a group that we have specifically assigned to
+# created users
+function list_setup_users() {
+  local groupname=${ALL_USERS_GROUP}
 
-function setup_ssh_keys() {
-  log_function $@
+  awk -F':' "/^${groupname}:/"'{print $4}' /etc/group | sed 's/,/\n/'
+}
 
-  if do_once; then
-    sed -i -E 's/AuthorizedKeysFile .+/AuthorizedKeysFile \/etc\/user_configs\/ssh\/authorized_keys\/%u/g' /etc/ssh/sshd_config
-    service sshd restart
-    add_status
+# List only users that are setup and have not been locked
+# (due to password retries or an admin locking the account)
+function list_unlocked_users() {
+  IFS='
+'
+  for uname in $(list_setup_users); do
+    [ ! $(is_user_locked "${uname}") ] && echo $uname
+  done
+  IFS=' '
+}
+
+# Check if the specified user has been locked
+function is_user_locked() {
+  local user=$1
+  if [ "$(getent shadow ${user})" ] && [ "$(passwd -S ${user} 2> /dev/null | grep locked)" ]; then
+    echo locked
   fi
-
-  for f in $(ls ${SSH_AUTH_KEYS}); do
-    chown $f:root ${SSH_AUTH_KEYS}/${f}
-    chmod 400 ${SSH_AUTH_KEYS}/${f}
-  done
 }
 
-function setup_ssh_allow_passwords() {
-  log_function $@
+### Google 2FA
 
-  sed -i -E 's/PasswordAuthentication .+/PasswordAuthentication yes/g' /etc/ssh/sshd_config
-  service sshd restart
-}
-
-####### GNOME 
-# Args:
-#   Function name
-#   Script
-function setup_autostart_exec() {
-
-  local fn=$1
-  local script=$2
-
-  echo "${script}" > /usr/local/bin/${fn}
-  chmod 775 /usr/local/bin/${fn}
-
-  cat > /etc/xdg/autostart/${fn}.desktop << EOF
-[Desktop Entry]
-Encoding=UTF-8
-Exec=/usr/local/bin/${fn}
-Name=run-${fn}
-Comment=Autostart Run ${fn}
-Terminal=false
-OnlyShowIn=GNOME
-Type=Application
-StartupNotify=false
-X-GNOME-Autostart-enabled=true
-NoDisplay=true
-EOF
-
-}
-
-
-#######  2FA
-
-
-function disable_root_login_ssh() {
-  log_function $@
-  sed -i -E "s/.*PermitRootLogin .*/PermitRootLogin no/g" /etc/ssh/sshd_config
-  service sshd restart
-}
-
-function pull_two_factor_auth_setups() {
-  log_function $@
-  do_once || return
-
-  for f in $(list_setup_users); do
-    local gafile=${USER_BASE_DIRS}/${f}/.google_authenticator
-    if [ -f ${gafile} ]; then
-      local gatarget=/home/${f}/.google_authenticator
-      cp -f ${gafile} ${gatarget}
-      chown ${f}:${f} ${gatarget}
-      chmod 600 ${gatarget}
-      log INFO "Copied back .google_authenticator file for ${f}"
-    fi
-  done
-
-  add_status
-}
-
-# Must be run after GNOME is installed if you are using VNC/RDP
-function setup_two_factor_auth() {
-  log_function $@
-  do_once || return
-
-  yum install -y google-authenticator
-
-  pull_two_factor_auth_setups
-
-  # Make users setup 2FA
-  cat > ${SETUP_2FA} << EOF
-#!/bin/bash
-rm -f \${HOME}/.google_authenticator 
-rm -f \${HOME}/.google_authenticator-prep
-google-authenticator -t -d -Q UTF8 -r 6 -R 30 -w 3 -f
-mv \${HOME}/.google_authenticator \${HOME}/.google_authenticator-prep
-
-cat << DONE1
-=======================================================================
-* IMPORTANT - do not close this window                                *
-*                                                                     *
-* You do not have two factor authentication set up for your account   *
-* To ensure your account is compliant, scan the QR code with your     *
-* authenticator app now. Any of the following apps are known to work  *
-* Duo Mobile, Google Authenticator, Microsoft Authenticator and Authy *
-=======================================================================
-=======================================================================
-* When you have set up your authenticator app:                        *
-* Click on this window, then press Enter.                             *
-=======================================================================
-DONE1
-read
-rm -f \${HOME}/.google_authenticator 
-mv \${HOME}/.google_authenticator-prep \${HOME}/.google_authenticator
-cp -f \${HOME}/.google_authenticator ${USER_BASE_DIRS}/\${USER}/
-if [ -f \${HOME}/.google_authenticator-prep ] || [ ! -f \${HOME}/.google_authenticator ] ; then
-  clear
-  echo "Something went wrong setting up the authenticator."
-  echo "Please try again"
-  echo "Press enter to continue"
-  read $press_enter
-  clear
-  ${SETUP_2FA}
+if [ "$(which google-authenticator 2> /dev/null)" ]; then
+  get_source user_2fa.sh no_reload
 fi
-EOF
-
-  cat > "${SETUP_2FA}-onstart" << EOF
-if [ ! -f \${HOME}/.google_authenticator ]; then
-  gnome-terminal --geometry=80x50 -- setup-2fa
-fi 
-EOF
-
-  cat > /etc/xdg/autostart/setup_2fa.desktop << EOF
-[Desktop Entry]
-Encoding=UTF-8
-Exec=${SETUP_2FA}-onstart
-Name=authenticate-2fa
-Comment=Setup user 2FA
-Terminal=false
-OnlyShowIn=GNOME
-Type=Application
-StartupNotify=false
-X-GNOME-Autostart-enabled=true
-EOF
-
-  chmod 775 ${SETUP_2FA}
-  chmod 775 ${SETUP_2FA}-onstart
-
-  # Tell PAM to optionally use 2FA
-  echo "auth required pam_google_authenticator.so nullok" >> /etc/pam.d/sshd
-  #sed -i -E "s/auth.+substack.+password-auth/# auth substack password-auth/g" /etc/pam.d/sshd
-
-  # Setup SSH
-
-  sed -i -E "s/^ChallengeResponseAuthentication .*/ChallengeResponseAuthentication yes/g" /etc/ssh/sshd_config
-  echo "ClientAliveInterval 120" >> /etc/ssh/sshd_config
-  echo "ClientAliveCountMax 2" >> /etc/ssh/sshd_config
-  echo "AuthenticationMethods publickey,password publickey,keyboard-interactive" >> /etc/ssh/sshd_config
-  systemctl restart sshd.service
-
-  # Setup GNOME login
-
-  if [ -f /etc/pam.d/gdm-password ]; then
-    echo "auth required pam_google_authenticator.so nullok" >> /etc/pam.d/gdm-password
-  fi
-
-  # Direct login
-  echo "auth required pam_google_authenticator.so nullok" >> /etc/pam.d/login
-
-  add_status
-}
-
-function reset_google_auths() {
-
-  local reset2fa=${USER_CONFIGS_DIR}/reset2fa
-  mkdir -p "${reset2fa}"
-  chown :${ADMIN_GROUP} "${reset2fa}"
-  chmod 770 "${reset2fa}"
-
-  log INFO "Resetting google authenticator for users listed in ${reset2fa} :" $(ls "${reset2fa}")
-
-  for f in $(ls "${reset2fa}"); do
-    rm -f /home/${f}/.google_authenticator
-    rm -f ${USER_BASE_DIRS}/${f}/.google_authenticator
-    rm -f ${reset2fa}/${f}
-    log INFO "Reset google authenticator for ${f}"
-
-  done
-
-}

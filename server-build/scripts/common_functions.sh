@@ -18,6 +18,7 @@ MEMTMP=/dev/shm
 LOCKFILE=${MEMTMP}/setup-common-lock
 LOCKDIR=/var/lock/server-setup-dir
 LOCKSLEEP=15
+MAX_LOCK_TIME=300
 UTIL_SCRIPTS_DIR=/usr/sbin
 ADMIN_GROUP=fphsadmi
 PW_EXP_WARN_DAYS=21
@@ -32,6 +33,8 @@ SETUP_2FA=/usr/local/bin/setup-2fa
 CRON_DIR=/etc/cron.d
 GIT_ASKPASS=${SETUP_DIR}/git_get_password.sh
 
+# Group used to identify all real users added to this box
+ALL_USERS_GROUP=${ALL_USERS_GROUP:=restruser}
 
 
 JOURNAL_LOGGER=$(which systemd-cat)
@@ -45,7 +48,7 @@ JOURNAL_LOGGER=$(which systemd-cat)
 ############### PUBLIC SETUP FUNCTIONS ###############
 #
 
-# setup basics
+# setup basics, run when the instance is first run, or on a reboot
 function setup_basics() {
   log_function $@
   if do_once; then
@@ -56,6 +59,7 @@ function setup_basics() {
     yum install -y epel-release
     yum -y update
     yum install -y nano htop unzip wget iftop psmisc yum-plugin-versionlock
+    remove_ssh_server
     setup_rebooter
     setup_aws_ssm_agent
     setup_firewall
@@ -70,6 +74,23 @@ function setup_basics() {
 
 }
 
+# Run any startup scripts that may be required on a box being restarted.
+# By default, we perform essential yum upgrades (security)
+# and start the amazon-ssm-agent to ensure emergency access
+# by sysadmins is possible, even if the systemd service was incorrectly
+# configured and was not started.
+function handle_restart() {
+  log_function $@
+  yum upgrade -y
+  systemctl start amazon-ssm-agent
+  package-cleanup --oldkernels --count=1
+  source_env_onrestart
+  get_source user_functions.sh
+  refresh_users
+  add_status
+}
+
+# setup the utility scripts for admins
 function add_util_scripts() {
   log_function $@
 
@@ -83,6 +104,7 @@ function add_util_scripts() {
   add_status
 }
 
+# save essential environment variables into a file that can be sourced directly from this server
 function save_env() {
   do_once || return
   log_function $@
@@ -111,6 +133,8 @@ function save_env() {
   add_status
 }
 
+# If a BOX_STORE is set, save the essential environment variables to the box store
+# so that it can be retrieved in future
 function save_env_server_store() {
   do_once || return
   log_function $@
@@ -125,6 +149,8 @@ function save_env_server_store() {
   add_status
 }
 
+# The "box store" is a location on the shared filesystem where box specific data
+# can be stored and retrieved even if local storage has been destroyed.
 # Save the file in the first argument to the box store
 # By default, we only overwrite if the file is newer than that in the store
 # To force overwriting with an older file, use the second argument 'any-age'
@@ -155,6 +181,7 @@ function save_to_box_store() {
 
 }
 
+# get the specified file from the box store
 function get_from_box_store() {
   log_function $@
 
@@ -173,6 +200,8 @@ function get_from_box_store() {
 
 }
 
+# When the common functions are first run, the setup needs to set the
+# box store in case it is used
 function set_box_store() {
   log_function $@
 
@@ -182,18 +211,14 @@ function set_box_store() {
   fi
 }
 
-function handle_restart() {
-  log_function $@
-  yum upgrade -y
-  systemctl start amazon-ssm-agent
-  add_status
-
-}
-
 #
 ############### SYSTEM CONFIGURATION UTILITIES ###############
 #
 
+# A systemd oneshot service, runs /root/setup/server-build-startup.sh
+# on a restart.
+# By default this script is sourced (triggering all the associated functions)
+# and exits.
 function setup_rebooter() {
 
   do_once || return
@@ -240,19 +265,16 @@ function add_swap() {
 
 }
 
-# Add sudo user with username as first arg
+# Add a sudo user with username as first arg
 function add_sudo_user() {
   log_function $@
   local new_username=$1
-  DEF_PW=$(ec2-metadata -i | cut -d " " -f 2)
   adduser ${new_username}
-  # Previously we set the init password to be the instance id. Now we rely on the user_configs/passwords/init file
-  # usermod -p $(openssl passwd -1 "${DEF_PW}") ${new_username}
-  # passwd --expire ${new_username}
   usermod -aG wheel ${new_username}
 }
 
-# Setup users and remove default user
+# Initial setup of users (and removal of default EC2 user)
+# typically when the box is created.
 function init_users() {
 
   do_once || return
@@ -267,6 +289,7 @@ function init_users() {
   add_status
 }
 
+# Set the real hostname for the box
 function set_hostname() {
   do_once || return
 
@@ -283,6 +306,23 @@ function set_hostname() {
 
 }
 
+# Remove the ssh server, unless marked not to
+function remove_ssh_server() {
+  do_once || return
+
+  log_function $@
+
+  if [ ! "$KEEP_SSH_SERVER" ]; then
+    systemctl disable sshd
+    yum remove -y openssh-server
+  else
+    log INFO "KEEP_SSH_SERVER requested. Not removing."
+  fi
+  add_status
+}
+
+# On an OS that doesn't provide it by default, setup the AWS SSM agent for
+# sysadmin connections via the Session Manager, and tracking the system assets
 function setup_aws_ssm_agent() {
   log_function $@
   if do_once; then
@@ -316,6 +356,7 @@ function setup_aws_ssm_agent() {
   fi
 }
 
+# Set up the firewall. We use iptables rather than UFW, for consistency across boxes
 function setup_firewall() {
   log_function $@
   if do_once; then
@@ -347,6 +388,8 @@ function setup_firewall() {
 
 }
 
+# Set YUM to routinely run security updates, if this is Centos OS.
+# This assumes Amazon Linux servers are managed through Elastic Beanstalk or some other mechanism
 function setup_security_updates() {
   do_once || return
   log_function $@
@@ -366,25 +409,22 @@ function setup_security_updates() {
     systemctl restart yum-cron
 
   else
-
     log INFO "${FUNCNAME[0]}($@) - Doing nothing, since this is not a Centos box"
   fi
 
 }
 
-# For example "America/New_York"
+# Set the server timezone for end-user boxes such as remote desktops
+# For example:
+#   set_server_timezone "America/New_York"
 function set_server_timezone() {
   log_function $@
   timedatectl set-timezone $1
 }
 
-function run_admin_actions() {
-  reset_google_auths
-  kill_user_processes
-}
 
-
-
+# Clean the RPM database to ensure installations and auto upgrades don't break
+# and clean cached package files
 function cleanup_rpm_db() {
   log INFO "RPM DB requires cleanup"
   mv -f /var/lib/rpm/__db* /tmp/
@@ -397,12 +437,20 @@ function cleanup_rpm_db() {
 #
 
 # download and source script from S3
+# If the the second arg is set, only download if the file doesn't already exist
 function get_source() {
   log_function $@
   local script_file=$1
+  local no_reload=$2
   mkdir -p ${SETUP_DIR}
   cd ${SETUP_DIR}
-  # aws s3 cp --only-show-errors s3://${SERVICE_ASSETS_BUCKET}/scripts/${script_file} ${script_file}
+
+  if [ -f "${script_file}" ] && [ "${no_reload}" ]; then
+    log INFO "Not reloading source. Already exists and no_reload specified"
+  else
+#    aws s3 cp --only-show-errors s3://${SERVICE_ASSETS_BUCKET}/scripts/${script_file} ${script_file}
+  fi
+
   source ${script_file}
 }
 
@@ -542,7 +590,14 @@ function init_templates() {
   \cp -rf ${SETUP_DIR}/box_templates/${box}/${group}/ ${TEMPLATES_DIR}/${group}/ 
 }
 
-# use a template to make a server file
+# Use a template to make a server file
+# init_templates must have already been called to pull the templates to the box.
+# By default, environment variable subsitutions are made within the template. To avoid this,
+# use no_substitution to avoid $ symbols breaking things.
+# To handle substitutions where literal $ symbols must be retained in the template, an approach is to call
+# with SB_ENV='$' and use ${SB_ENV} in the template where the $ symbol should appear.
+# Example:
+#   use_template <template group> <template path/file> <optional "no_substition">
 function use_template() {
   local group=$1
   local template=$2
@@ -562,6 +617,7 @@ function use_template() {
   log INFO "${group} template created: ${template}"
 }
 
+# Find templates matching the pattern and use them all
 function use_templates_matching() {
   log_function $@
 
@@ -572,23 +628,80 @@ function use_templates_matching() {
 
   local group=$1
   local template_match=$2
+  local no_substitution=$3
 
   if [ -d "${TEMPLATES_DIR}/${group}/${template_match}" ]; then
     for f in $(ls "${TEMPLATES_DIR}/${group}/${template_match}"); do
-      use_template ${group} ${CRON_DIR}/${f}
+      use_template ${group} ${CRON_DIR}/${f} ${no_substitution}
     done
   fi
 
   add_status
 }
 
-# Deploy a directory as a subdirectory inside an existing directory
+function template_exists() {
+  local group=$1
+  local template_path=$2
+  if [ -f ${TEMPLATES_DIR}/${group}/${template_path} ]; then
+    echo 'exists'
+  else
+    return
+  fi
+}
+
+### Git related
+
+function git_setup_password() {
+  init_account_secrets
+  echo '#!/bin/bash' > ${GIT_ASKPASS}
+  echo 'exec echo "$GIT_PASSWORD"' >> ${GIT_ASKPASS}
+  chmod 700 ${GIT_ASKPASS}
+}
+
+function git_clone_or_pull() {
+  log_function $@
+
+  local repo_name=$1
+  local repo_url=$2
+
+  local GITCMD=git
+
+  if [ -f /opt/anaconda/bin/git ]; then
+    local GITCMD=/opt/anaconda/bin/git
+  fi
+
+  if [ "$(which conda)" ]; then
+    conda activate base
+  fi
+
+  mkdir -p ${GITREPOS_DIR}
+  cd ${GITREPOS_DIR}
+
+  git_setup_password
+  export GIT_ASKPASS
+  export GIT_PASSWORD
+
+  if [ -d ${repo_name}/.git ]; then
+    log INFO "Pulling existing git repo ${repo_name}"
+    cd ${repo_name}
+    ${GITCMD} pull
+  else
+    log INFO "Cloning new git repo ${repo_name}"
+    ${GITCMD} clone ${repo_url}
+    cd ${repo_name}
+  fi
+
+  add_status
+}
+
+# Deploy a directory as a subdirectory inside an existing directory. Typically used to
+# deploy a directory from a cloned git repo to its destination.
 # Optionally specify a user:group to set on all deployed files and directories
-#   deploy_dir_into redcap_pull /FPHS/auto-services fphsetl <optional: delete>
-# Will add the directory redcap_pull inside auto-services
 # If option delete argument is added, the destination will have files and directories deleted
 # that are not in the source. Beware! This is recursive and should only be used on complete trees
 # with no other dependencies below them
+# For example, to add the directory redcap_pull inside auto-services:
+#   deploy_dir_into redcap_pull /FPHS/auto-services fphsetl <optional: delete>
 function deploy_dir_into() {
   log_function $@
 
@@ -617,83 +730,6 @@ function deploy_dir_into() {
     chown --recursive ${set_user_group} ${dest_dir}/${source_dir}
   fi
 
-  add_status
-}
-
-function template_exists() {
-  local group=$1
-  local template_path=$2
-  if [ -f ${TEMPLATES_DIR}/${group}/${template_path} ]; then
-    echo 'exists'
-  else
-    return
-  fi
-}
-
-function git_setup_password() {
-  init_account_secrets
-  echo '#!/bin/bash' > ${GIT_ASKPASS}
-  echo 'exec echo "$GIT_PASSWORD"' >> ${GIT_ASKPASS}
-  chmod 700 ${GIT_ASKPASS}
-}
-
-function git_clone_or_pull() {
-  log_function $@
-
-  local repo_name=$1
-  local repo_url=$2
-
-  local GITCMD=git
-
-  if [ -d /opt/anaconda/bin ]; then
-    local GITCMD=/opt/anaconda/bin/git
-  fi
-
-  if [ "$(which conda)" ]; then
-    conda activate base
-  fi
-
-  mkdir -p ${GITREPOS_DIR}
-  cd ${GITREPOS_DIR}
-
-  git_setup_password
-  export GIT_ASKPASS
-  export GIT_PASSWORD
-
-  if [ -d ${repo_name}/.git ]; then
-    log INFO "Pulling existing git repo ${repo_name}"
-    cd ${repo_name}
-    ${GITCMD} pull
-  else
-    log INFO "Cloning new git repo ${repo_name}"
-    ${GITCMD} clone ${repo_url}
-    cd ${repo_name}
-  fi
-
-  add_status
-}
-
-# Setup a cron.d entry to rerun user setup every 15 minutes
-function setup_user_refresh() {
-  log_function $@
-  local group=setup_users
-  local template_path=${CRON_DIR}/refreshusers
-  # See if there is a box specific version
-  init_templates ${group} ${BOX_NAME}
-  if [ ! $(template_exists ${group} ${template_path}) ]; then
-    init_templates ${group}
-  fi
-  box_name=${BOX_NAME} SERVICE_ASSETS_BUCKET=${SERVICE_ASSETS_BUCKET} user_base_dirs=${USER_BASE_DIRS} use_template setup_users ${template_path}
-
-}
-
-function setup_mailx() {
-  do_once || return
-  log_function $@
-  yum install -y mailx || echo 'already installed mailx'
-  init_account_secrets
-  init_templates environment
-  smtp_username=${smtp_username} smtp_password=${smtp_password} use_template environment /root/.mailrc
   add_status
 }
 
@@ -811,13 +847,19 @@ function lock_script() {
   while [ $? != 0 ]; do
     local lockpid=$(cat ${LOCKFILE})
 
-    log INFO "Waiting for a lock. Running task: ${lockpid}"
+    log INFO "Waiting for a lock. Running task: ${lockpid} for $(lockfile_age) sec"
 
     if [ ! "$(lock_task_exists)" ]; then
       log INFO "The lock task no longer exists: ${lockpid}. Unlocking forcefully"
       unlock_script
     else
-      sleep ${LOCKSLEEP}
+
+      if [ "$(lockfile_age)" -gt ${MAX_LOCK_TIME} ]; then
+        log ERROR "Unlocking lockfile for ${lockpid} forcefully, since it is > ${MAX_LOCK_TIME}"
+        unlock_script force
+      else
+        sleep ${LOCKSLEEP}
+      fi
     fi
     mkdir ${LOCKDIR} &> /dev/null
   done
@@ -826,7 +868,7 @@ function lock_script() {
   log INFO "Running as: $(ps p $$)"
   if [ -f ${LOCKFILE} ]; then
     local lockpid=$(cat ${LOCKFILE})
-    log ERROR "The lockfile ${LOCKFILE} is present. Not continuing. Running task: $(ps p ${lockpid})."
+    log ERROR "The lockfile ${LOCKFILE} is present. Not continuing. Running task: $(ps p ${lockpid}) for $(lockfile_age) sec"
     exit
   else
     echo $$ > ${LOCKFILE}
@@ -835,6 +877,12 @@ function lock_script() {
 
 }
 
+function lockfile_age() {
+  echo $(($(date +%s) - $(date +%s -r "${LOCKFILE}")))
+}
+
+# Unlock the mutex on the script if the current PID matches the locker.
+# Or call with "force" to force an unlock independent of PID
 function unlock_script() {
   local lockpid=$(cat ${LOCKFILE})
   local force=$1
@@ -849,6 +897,7 @@ function unlock_script() {
   fi
 }
 
+# Called as soon as this file has been sourced
 function on_start() {
   SCRIPTNAME="$(basename "$0")"
   setup_logs
@@ -860,6 +909,8 @@ function on_start() {
   os_specific_setup
   set_box_store
   essential_setup
+  get_source user_functions.sh no_reload
+
   # Check RPM DB and cleanup if necessary
   yum list installed -C > /dev/null || cleanup_rpm_db
 
@@ -872,6 +923,7 @@ function on_start() {
   log INFO "Starting common_functions"
 }
 
+# Called when the current process exits for whatever reason
 function on_exit() {
   trap - EXIT
   unlock_script
@@ -889,6 +941,9 @@ function on_exit() {
   echo 0
 }
 
+# Any field in /root/setup/ named env_build_*.sh will be
+# sourced. This allows box specific functions to be run
+# every time the common_functions script is sourced.
 function source_env_builds() {
   source ${ENV_SOURCE}
   if [ -f ${SETUP_DIR}/env_build_*.sh ]; then
@@ -898,6 +953,20 @@ function source_env_builds() {
   fi
 }
 
+# Any field in /root/setup/ named env_onrestart_*.sh will be
+# sourced. This allows box specific functions to be run
+# every time the server is restarted.
+function source_env_onrestart() {
+  source ${ENV_SOURCE}
+  if [ -f ${SETUP_DIR}/env_onrestart_*.sh ]; then
+    for f in $(ls ${SETUP_DIR}/env_onrestart_*.sh); do
+      source ${f}
+    done
+  fi
+}
+
+# Within a locked down VPC, ntp servers can't be accessed. Setup
+# to use VPC accessible time servers
 function setup_chrony_for_ntp() {
   log_function $@
 
@@ -912,6 +981,16 @@ function setup_chrony_for_ntp() {
   fi
   timedatectl
 
+}
+
+function setup_mailx() {
+  do_once || return
+  log_function $@
+  yum install -y mailx || echo 'already installed mailx'
+  init_account_secrets
+  init_templates environment
+  smtp_username=${smtp_username} smtp_password=${smtp_password} use_template environment /root/.mailrc
+  add_status
 }
 
 function essential_setup() {
@@ -957,7 +1036,9 @@ function log() {
 
   echo ${FULLMSG} >> ${SB_LOGFILE}
   if [ -z "${SCRIPTNAME}" ]; then
-    echo ${FULLMSG}
+    # Echo to stderr if we are running interactively, to ensure we don't break
+    # echo'd results in the scripts
+    echo >&2 ${FULLMSG}
   fi
 
   echo "SETUPLOGENTRY ${FULLMSG}" >> "${SB_ERRORFILE}"
