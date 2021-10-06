@@ -539,7 +539,7 @@ function init_templates() {
   rm -rf ${TEMPLATES_DIR}
   mkdir -p ${TEMPLATES_DIR}
   # aws s3 cp s3://${SERVICE_ASSETS_BUCKET}/templates/${box}/${group}/ ${TEMPLATES_DIR}/${group}/ --recursive
-  cp -r ${SETUP_DIR}/box_templates/${box}/${group}/ ${TEMPLATES_DIR}/${group}/ 
+  \cp -rf ${SETUP_DIR}/box_templates/${box}/${group}/ ${TEMPLATES_DIR}/${group}/ 
 }
 
 # use a template to make a server file
