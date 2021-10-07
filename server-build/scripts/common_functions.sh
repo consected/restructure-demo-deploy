@@ -56,8 +56,7 @@ function setup_basics() {
     init_users
     set_hostname
     yum upgrade -y
-    yum install -y epel-release
-    yum -y update
+    install_epel_release
     yum install -y nano htop unzip wget iftop psmisc yum-plugin-versionlock
     remove_ssh_server
     setup_rebooter
@@ -72,6 +71,17 @@ function setup_basics() {
 
   add_status
 
+}
+
+# Install EPEL for extra packages
+function install_epel_release() {
+  log_function $@
+  if [ "$(which amazon-linux-extras 2> /dev/null)" ]; then
+    amazon-linux-extras install epel
+  else
+    yum install -y epel-release
+  fi
+  yum -y update
 }
 
 # Run any startup scripts that may be required on a box being restarted.
