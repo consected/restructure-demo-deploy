@@ -36,7 +36,6 @@ GIT_ASKPASS=${SETUP_DIR}/git_get_password.sh
 # Group used to identify all real users added to this box
 ALL_USERS_GROUP=${ALL_USERS_GROUP:=restruser}
 
-
 JOURNAL_LOGGER=$(which systemd-cat)
 
 # set -o pipefail  # trace ERR through pipes
@@ -432,7 +431,6 @@ function set_server_timezone() {
   timedatectl set-timezone $1
 }
 
-
 # Clean the RPM database to ensure installations and auto upgrades don't break
 # and clean cached package files
 function cleanup_rpm_db() {
@@ -597,7 +595,7 @@ function init_templates() {
   rm -rf ${TEMPLATES_DIR}
   mkdir -p ${TEMPLATES_DIR}
   # aws s3 cp s3://${SERVICE_ASSETS_BUCKET}/templates/${box}/${group}/ ${TEMPLATES_DIR}/${group}/ --recursive
-  \cp -rf ${SETUP_DIR}/box_templates/${box}/${group}/ ${TEMPLATES_DIR}/${group}/ 
+  \cp -rf ${SETUP_DIR}/box_templates/${box}/${group}/ ${TEMPLATES_DIR}/${group}/
 }
 
 # Use a template to make a server file
