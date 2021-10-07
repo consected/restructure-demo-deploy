@@ -24,8 +24,8 @@ function install_restructure_basics() {
   do_once || return
   log_function $@
 
-  sudo amazon-linux-extras install epel -y
-  sudo yum install -y bindfs autoconf fuse fuse-libs fuse-devel libarchive libarchive-devel amazon-efs-utils
+  amazon-linux-extras install -y epel
+  yum install -y bindfs autoconf fuse fuse-libs fuse-devel libarchive libarchive-devel amazon-efs-utils
 
   add_status
 }
@@ -34,7 +34,7 @@ function install_memcached() {
   do_once || return
   log_function $@
 
-  amazon-linux-extras install memcached1.5
+  amazon-linux-extras install -y memcached1.5
   yum install -y memcached
   systemctl restart memcached
 

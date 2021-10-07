@@ -77,7 +77,7 @@ function setup_basics() {
 function install_epel_release() {
   log_function $@
   if [ "$(which amazon-linux-extras 2> /dev/null)" ]; then
-    amazon-linux-extras install epel
+    amazon-linux-extras install -y epel
   else
     yum install -y epel-release
   fi
@@ -93,7 +93,7 @@ function handle_restart() {
   log_function $@
   yum upgrade -y
   systemctl start amazon-ssm-agent
-  package-cleanup --oldkernels --count=1
+  package-cleanup --oldkernels --count=1 -y
   source_env_onrestart
   get_source user_functions.sh
   refresh_users
