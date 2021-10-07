@@ -27,7 +27,7 @@ function setup_cron_user_refresh() {
     init_templates ${group}
   fi
   box_name=${BOX_NAME} SERVICE_ASSETS_BUCKET=${SERVICE_ASSETS_BUCKET} user_base_dirs=${USER_BASE_DIRS} use_template setup_users ${template_path}
-
+  add_status
 }
 
 # Save the current /etc/shadow password file to the box store, as a backup.

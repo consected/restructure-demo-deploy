@@ -37,6 +37,7 @@ GIT_ASKPASS=${SETUP_DIR}/git_get_password.sh
 ALL_USERS_GROUP=${ALL_USERS_GROUP:=restruser}
 
 JOURNAL_LOGGER=$(which systemd-cat)
+IAM_USERS_FILE=${USER_CONFIGS_DIR}/iam-users
 
 # set -o pipefail  # trace ERR through pipes
 # set -o errtrace  # trace ERR through 'time command' and other functions
@@ -52,6 +53,7 @@ function setup_basics() {
   log_function $@
   if do_once; then
     save_env
+    mkdir -p ${USER_CONFIGS_DIR}
     init_users
     set_hostname
     yum upgrade -y
