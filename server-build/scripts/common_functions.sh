@@ -447,8 +447,8 @@ function get_source() {
 
   if [ -f "${script_file}" ] && [ "${no_reload}" ]; then
     log INFO "Not reloading source. Already exists and no_reload specified"
-  else
-#    aws s3 cp --only-show-errors s3://${SERVICE_ASSETS_BUCKET}/scripts/${script_file} ${script_file}
+  # else
+  #  aws s3 cp --only-show-errors s3://${SERVICE_ASSETS_BUCKET}/scripts/${script_file} ${script_file}
   fi
 
   source ${script_file}
