@@ -262,8 +262,8 @@ function setup_user() {
     fi
   fi
 
-  # Set the password
-  echo \"${pw}\" | passwd --stdin ${uname}
+  # Don't set the password
+  # echo \"${pw}\" | passwd --stdin ${uname}
   # Set the number of days warning (defaults 14 but override if required)
   chage -W ${PW_EXP_WARN_DAYS} ${uname} 2>&1
 
