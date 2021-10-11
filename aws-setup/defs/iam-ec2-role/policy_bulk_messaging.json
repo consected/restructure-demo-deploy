@@ -1,0 +1,38 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": [
+        "mobiletargeting:PhoneNumberValidate"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:mobiletargeting:AWS_REGION:AWS_ACCT:*"
+    },
+    {
+      "Sid": "VisualEditor0",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:ListBucket",
+        "s3:GetObjectVersion"
+      ],
+      "Resource": [
+        "arn:aws:s3:::fphs.link/*",
+        "arn:aws:s3:::test-shortlink.fphs.link/*",
+        "arn:aws:s3:::fphs-url-shortener-logs/*",
+        "arn:aws:s3:::test-fphs-url-shortener-logs/*",
+        "arn:aws:s3:::fphs.link",
+        "arn:aws:s3:::test-shortlink.fphs.link",
+        "arn:aws:s3:::fphs-url-shortener-logs",
+        "arn:aws:s3:::test-fphs-url-shortener-logs"
+      ]
+    },
+    {
+      "Sid": "VisualEditor1",
+      "Effect": "Allow",
+      "Action": "s3:HeadBucket",
+      "Resource": "*"
+    }
+  ]
+}

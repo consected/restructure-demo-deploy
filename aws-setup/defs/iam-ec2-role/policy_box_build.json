@@ -1,0 +1,97 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AssignBeanstalkExtraIps0",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:AssignPrivateIpAddresses"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ServerBuildSsm",
+      "Effect": "Allow",
+      "Action": [
+        "ssmmessages:CreateControlChannel",
+        "ssmmessages:CreateDataChannel",
+        "ssmmessages:OpenControlChannel",
+        "ssmmessages:OpenDataChannel"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "FPHSLogsPolicy0",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:DescribeLogStreams",
+        "logs:CreateLogGroup",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ServiceAssetRead0",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::SERVICE_ASSETS_BUCKET",
+        "arn:aws:s3:::INSTALL_ASSETS_BUCKET"
+      ]
+    },
+    {
+      "Sid": "ServerBuildS3Get",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::SERVICE_ASSETS_BUCKET/*",
+        "arn:aws:s3:::INSTALL_ASSETS_BUCKET/*"
+      ]
+    },
+    {
+      "Sid": "ServerBuildS3Put",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::SERVICE_ASSETS_BUCKET/user_configs/*"
+      ]
+    },
+    {
+      "Sid": "ServerBuildSecrets0",
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": "arn:aws:secretsmanager:AWS_REGION:AWS_ACCT:secret:Repo/PROD/ServerBuild/SecretsGpgPasscode-*"
+    },
+    {
+      "Sid": "ServerBuildRoute53Change",
+      "Effect": "Allow",
+      "Action": [
+        "route53:ListHostedZones",
+        "route53:GetChange"
+      ],
+      "Resource": [
+        "*"
+      ]
+    },
+    {
+      "Sid": "CertbotPerformDNSChallenge0",
+      "Effect": "Allow",
+      "Action": [
+        "route53:ChangeResourceRecordSets"
+      ],
+      "Resource": [
+        "arn:aws:route53:::hostedzone/HOSTED_ZONE_ID"
+      ]
+    }
+  ]
+}

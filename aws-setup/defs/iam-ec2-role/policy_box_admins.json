@@ -1,0 +1,21 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "GetUser",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetGroup"
+      ],
+      "Resource": "arn:aws:iam::AWS_ACCT:group/*"
+    },
+    {
+      "Sid": "UserDetails",
+      "Effect": "Allow",
+      "Action": [
+        "iam:ListUserTags"
+      ],
+      "Resource": "arn:aws:iam::AWS_ACCT:user/*"
+    }
+  ]
+}
