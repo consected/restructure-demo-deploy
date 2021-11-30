@@ -1,8 +1,16 @@
 RESTR_FS_ROOT=${RESTR_FS_ROOT:=/efs1}
-RESTR_FS_DIR=${RESTR_FS_DIR:=appdev-main}
+RESTR_FS_DIR=${RESTR_FS_DIR:=${BOX_NAME}-main}
 RESTR_MOUNT_ROOT=${RESTR_MOUNT_ROOT:=/mnt/fphsfs}
 RESTR_WEBAPP_USER=${RESTR_WEBAPP_USER:=webapp}
 REMOUNT_EFS_SCRIPT=/root/setup/remount_efs.sh
+BIND_GROUPS='600 601 602'
+BIND_USER_ID=600
+# LO_MINOR_VERSION=6.1
+# LO_VERSION=${LO_MINOR_VERSION}.5
+LO_MINOR_VERSION=6.4
+LO_VERSION=${LO_MINOR_VERSION}.4
+LO_PATCH_VERSION=${LO_VERSION}.2
+LO_TAR=LibreOffice_${LO_VERSION}_Linux_x86-64_rpm.tar.gz
 
 function setup_restructure_eb() {
   do_once || return
@@ -27,6 +35,10 @@ function install_restructure_basics() {
   amazon-linux-extras install -y epel
   yum install -y bindfs autoconf fuse fuse-libs fuse-devel libarchive libarchive-devel amazon-efs-utils
 
+  # Setup a cleanup cronjob that calls app-scripts/temfile-cleanup.sh
+  init_templates general
+  use_template general /etc/cron.d/app-cleanup
+
   add_status
 }
 
@@ -50,19 +62,10 @@ function configure_efs() {
   local WEBAPP_USER=${RESTR_WEBAPP_USER}
   local EFS_ID=${RESTR_EFS_ID}
 
-  mkdir -p $FS_ROOT
-  getent group 599 || groupadd --gid 599 nfs_store_all_access
-  getent group 600 || groupadd --gid 600 nfs_store_group_0
-  getent group 601 || groupadd --gid 601 nfs_store_group_1
-  getent passwd 600 || useradd --user-group --uid 600 nfsuser
-  usermod -a --groups=599,600,601 $WEBAPP_USER
-  usermod -a --groups=599,600,601 root
-  mkdir -p $FS_ROOT
-  mountpoint -q $FS_ROOT || mount -t efs -o tls ${EFS_ID}:/ $FS_ROOT
-  mkdir -p $MOUNT_ROOT/gid600
-  mkdir -p $MOUNT_ROOT/gid601
-  mountpoint -q $MOUNT_ROOT/gid600 || bindfs --map=@600/@599 --create-for-group=600 --create-for-user=600 --chown-ignore --chmod-ignore --create-with-perms='u=rwD:g=rwD:o=' $FS_ROOT/$FS_DIR $MOUNT_ROOT/gid600
-  mountpoint -q $MOUNT_ROOT/gid601 || bindfs --map=@601/@599 --create-for-group=601 --create-for-user=600 --chown-ignore --chmod-ignore --create-with-perms='u=rwD:g=rwD:o=' $FS_ROOT/$FS_DIR $MOUNT_ROOT/gid601
+  if [ ! "${FS_ROOT}" ] || [ ! "${FS_DIR}" ] || [ ! "${MOUNT_ROOT}" ] || [ ! "${WEBAPP_USER}" ] || [ ! "${EFS_ID}" ]; then
+    log ERROR "Variables not set: FS_ROOT=${RESTR_FS_ROOT} FS_DIR=${RESTR_FS_DIR} MOUNT_ROOT=${RESTR_MOUNT_ROOT} WEBAPP_USER=${RESTR_WEBAPP_USER} EFS_ID=${RESTR_EFS_ID}"
+    return 9
+  fi
 
   # Create a script to run for remounting efs on future reboots
   if [ ! -f ${REMOUNT_EFS_SCRIPT} ]; then
@@ -88,6 +91,38 @@ EOF
   use_template rebooter /usr/lib/systemd/system/mount-on-boot.service
   systemctl enable mount-on-boot
 
+  # Now run the actual setup
+  log INFO "Using variables: FS_ROOT=${RESTR_FS_ROOT} FS_DIR=${RESTR_FS_DIR} MOUNT_ROOT=${RESTR_MOUNT_ROOT} WEBAPP_USER=${RESTR_WEBAPP_USER} EFS_ID=${RESTR_EFS_ID}"
+
+  mkdir -p $FS_ROOT
+  getent group 599 || groupadd --gid 599 nfs_store_all_access
+  getent group 600 || groupadd --gid 600 nfs_store_group_0
+  getent group 601 || groupadd --gid 601 nfs_store_group_1
+  getent passwd ${BIND_USER_ID} || useradd --user-group --uid ${BIND_USER_ID} nfsuser
+  usermod -a --groups=599,600,601 $WEBAPP_USER
+  usermod -a --groups=599,600,601 root
+  mkdir -p $FS_ROOT
+  mountpoint -q $FS_ROOT || mount -t efs -o tls ${EFS_ID}:/ $FS_ROOT
+  log INFO "mountpoint ${FS_ROOT}: $(mountpoint ${FS_ROOT})"
+  if [ "$(mountpoint -q ${FS_ROOT})" ]; then
+    log ERROR "Failed to mount EFS ${EFS_ID} at ${FS_ROOT}"
+    return 7
+  fi
+
+  cd $FS_ROOT
+  mkdir -p $FS_DIR
+
+  for m in ${BIND_GROUPS}; do
+    mkdir -p $MOUNT_ROOT/gid${m}
+    mountpoint -q $MOUNT_ROOT/gid${m} || bindfs --map=@${m}/@599 --create-for-group=${m} --create-for-user=${BIND_USER_ID} --chown-ignore --chmod-ignore --create-with-perms='u=rwD:g=rwD:o=' $FS_ROOT/$FS_DIR $MOUNT_ROOT/gid${m}
+    if [ "$(mountpoint $MOUNT_ROOT/gid${m} | grep 'is not a mountpoint')" ]; then
+      log ERROR "Failed to bind mount EFS ${EFS_ID} for $FS_ROOT/$FS_DIR $MOUNT_ROOT/gid${m}"
+      return 8
+    else
+      log INFO "Bind mount ${m} successful"
+    fi
+  done
+
   add_status
 }
 
@@ -99,12 +134,13 @@ function install_libreoffice() {
   else
     yum install -y cups dbus-libs dbus-glib
     cd /tmp
-    wget https://s3.amazonaws.com/${INSTALL_ASSETS_BUCKET}/LibreOffice_6.1.5_Linux_x86-64_rpm.tar.gz
-    tar -xzf LibreOffice_6.1.5_Linux_x86-64_rpm.tar.gz
-    rm LibreOffice_6.1.5_Linux_x86-64_rpm.tar.gz
-    cd LibreOffice_6.1.5.2_Linux_x86-64_rpm/RPMS/
+    rm -f /usr/bin/libreoffice
+    aws s3 cp s3://${INSTALL_ASSETS_BUCKET}/${LO_TAR} . --region=${AWS_REGION}
+    tar -xzf ${LO_TAR}
+    rm -f ${LO_TAR}
+    cd LibreOffice_${LO_PATCH_VERSION}_Linux_x86-64_rpm/RPMS/
     yum localinstall -y *.rpm
-    ln -s /usr/bin/libreoffice6.1 /usr/bin/libreoffice
+    ln -s /usr/bin/libreoffice${LO_MINOR_VERSION} /usr/bin/libreoffice
     # Give webapp a home directory so libreoffice can store its config
     # No need for shell access though
     # chsh -s /bin/bash webapp
@@ -114,10 +150,16 @@ function install_libreoffice() {
     echo "012,123" > a.csv
     sudo -u webapp libreoffice --headless --convert-to pdf a.csv
     cd /tmp
-    rm -rf /tmp/LibreOffice_6.1.5.2_Linux_x86-64_rpm
+    rm -rf /tmp/LibreOffice_${LO_PATCH_VERSION}_Linux_x86-64_rpm
+
+    libreoffice --headless --version
+    if [ $? != 0 ]; then
+      log ERROR "Failed to install libreoffice"
+    else
+      add_status
+    fi
   fi
 
-  add_status
 }
 
 function install_dicom_toolkit() {
@@ -129,9 +171,9 @@ function install_dicom_toolkit() {
     cd /tmp
     mkdir dcmtk
     cd dcmtk/
-    wget https://s3.amazonaws.com/${INSTALL_ASSETS_BUCKET}/dcmtk-3.6.4-install.tar.gz
+    aws s3 cp s3://${INSTALL_ASSETS_BUCKET}/dcmtk-3.6.4-install.tar.gz .
     tar -xzf dcmtk-3.6.4-install.tar.gz
-    rm dcmtk-3.6.4-install.tar.gz
+    rm -f dcmtk-3.6.4-install.tar.gz
     cd dcmtk-3.6.4-install
     cp -R usr/local/* /usr/
     ln -s /usr/share/dcmtk /usr/local/share/dcmtk
