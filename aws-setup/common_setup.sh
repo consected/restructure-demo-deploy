@@ -20,5 +20,5 @@ fi
 
 function gen_doc() {
   local infile=$1
-  sed "s/AWS_ACCT/${AWS_ACCT}/g" defs/${infile} > ${document_file}
+  sed "s/AWS_ACCT/${AWS_ACCT}/g" defs/${infile} | sed "s/AWS_REGION/${AWS_REGION}/g" | sed "s/ADMIN_EMAIL/${ADMIN_EMAIL}/g" > ${document_file}
 }
