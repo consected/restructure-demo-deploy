@@ -39,6 +39,9 @@ ALL_USERS_GROUP=${ALL_USERS_GROUP:=restruser}
 JOURNAL_LOGGER=$(which systemd-cat)
 IAM_USERS_FILE=${USER_CONFIGS_DIR}/iam-users
 
+# Remove the following packages (space separated list)
+REMOVE_PACKAGES=openssh
+
 # set -o pipefail  # trace ERR through pipes
 # set -o errtrace  # trace ERR through 'time command' and other functions
 # set -o nounset   ## set -u : exit the script if you try to use an uninitialised variable
@@ -52,21 +55,22 @@ IAM_USERS_FILE=${USER_CONFIGS_DIR}/iam-users
 function setup_basics() {
   log_function $@
   if do_once; then
-    save_env
     mkdir -p ${USER_CONFIGS_DIR}
+    save_env
+    set_box_store
     init_users
     set_hostname
-    yum upgrade -y
-    install_epel_release
-    yum install -y nano htop unzip wget iftop psmisc yum-plugin-versionlock
     remove_ssh_server
+    remove_listed_packages
     setup_rebooter
     setup_aws_ssm_agent
     setup_firewall
     setup_security_updates
+    setup_kernel_livepatch
     schedule_run_one_offs
     schedule_setup_reboot
   else
+    set_box_store
     handle_restart
   fi
 
@@ -136,7 +140,11 @@ function save_env() {
     SERVICE_ASSETS_BUCKET=${SERVICE_ASSETS_BUCKET} \
     INSTALL_ASSETS_BUCKET=${INSTALL_ASSETS_BUCKET} \
     AWS_ACCT=${AWS_ACCT} \
+    AWS_REGION=${AWS_REGION} \
+    NFS_MOUNTPOINT=${NFS_MOUNTPOINT} \
+    RESTR_EFS_ID=${RESTR_EFS_ID} \
     SYNC_CENTRAL_PASSWORD_FILES_ONCE=${SYNC_CENTRAL_PASSWORD_FILES_ONCE} \
+    NO_BOX_STORE=${NO_BOX_STORE} \
     use_template environment ${ENV_SOURCE}
 
   save_env_server_store
@@ -175,11 +183,21 @@ function save_to_box_store() {
 
   if [ -z "$1" ]; then
     log ERROR "save_to_box_store requires path argument"
-    return
+    return 2
+  fi
+
+  if [ "${NO_BOX_STORE}" ]; then
+    log INFO "No box store on this box"
+    return 0
   fi
 
   local from_path=$1
   local extra=$2
+
+  if ! check_box_store_filesystem; then
+    log ERROR "Box store NFS filesystem not mounted at ${NFS_MOUNTPOINT}"
+    return 1
+  fi
 
   if [ "${extra}" != 'any-age' ]; then
     local extra_arg='-u'
@@ -201,12 +219,30 @@ function get_from_box_store() {
     return
   fi
 
+  if [ "${NO_BOX_STORE}" ]; then
+    log INFO "No box store on this box"
+    return
+  fi
+
+  if ! check_box_store_filesystem; then
+    log ERROR "Box store NFS filesystem not mounted at ${NFS_MOUNTPOINT}"
+    return 1
+  fi
+
   local from_path=$1
   local store_path="${BOX_STORE}"/${from_path}
 
   if [ "${BOX_STORE}" ] && [ -s ${store_path} ]; then
     mkdir -p $(dirname ${from_path})
     \cp -f --preserve=all ${store_path} ${from_path}
+  else
+
+    local emptyres='empty'
+    if [ -s ${store_path} ]; then
+      local emptyres='not empty'
+    fi
+
+    log INFO "Not found from ${store_path} or destination is empty: ${emptyres}"
   fi
 
 }
@@ -216,10 +252,45 @@ function get_from_box_store() {
 function set_box_store() {
   log_function $@
 
-  if mountpoint -q ${NFS_MOUNTPOINT}; then
-    SERVER_STORE=${NFS_MOUNTPOINT}/server-store
-    BOX_STORE=${SERVER_STORE}/${BOX_NAME}
+  if [ "${NO_BOX_STORE}" ]; then
+    log INFO "No box store on this box"
+    return
   fi
+
+  if ! check_box_store_filesystem; then
+    mount_nfs
+  fi
+
+  if ! check_box_store_filesystem; then
+    log ERROR "Set Box Store - NFS filesystem not mounted at ${NFS_MOUNTPOINT}"
+    return 1
+  fi
+
+  SERVER_STORE=${NFS_MOUNTPOINT}/server-store
+  BOX_STORE=${SERVER_STORE}/${BOX_NAME}
+
+}
+
+function check_box_store_filesystem() {
+  return $(mountpoint -q ${NFS_MOUNTPOINT})
+}
+
+function mount_nfs() {
+  log_function $@
+
+  if [ ! "${RESTR_EFS_ID}" ] || [ ! "${NFS_MOUNTPOINT}" ]; then
+    log ERROR "Can't mount NFS - incorrect settings: ${RESTR_EFS_ID}:/ ${NFS_MOUNTPOINT}"
+    return 1
+  fi
+
+  mkdir -p "${NFS_MOUNTPOINT}"
+  mountpoint -q ${NFS_MOUNTPOINT} || mount -t efs -o tls ${RESTR_EFS_ID}:/ ${NFS_MOUNTPOINT}
+
+  if ! check_box_store_filesystem; then
+    log ERROR "Mount NFS - NFS filesystem not mounted at ${NFS_MOUNTPOINT}"
+    return 2
+  fi
+
 }
 
 #
@@ -286,18 +357,16 @@ function add_sudo_user() {
 
 # Initial setup of users (and removal of default EC2 user)
 # typically when the box is created.
+# Also prevent default user login
 function init_users() {
 
   do_once || return
   log_function $@
 
-  get_source user_functions.sh
-  init_user_configs ${BOX_NAME}
-
-  # Prevent default user login
-  usermod -s /bin/false ${EC2USER}
-
-  add_status
+  get_source user_functions.sh &&
+    init_user_configs ${BOX_NAME} &&
+    usermod -s /bin/false ${EC2USER} &&
+    add_status
 }
 
 # Set the real hostname for the box
@@ -328,6 +397,21 @@ function remove_ssh_server() {
     yum remove -y openssh-server
   else
     log INFO "KEEP_SSH_SERVER requested. Not removing."
+  fi
+  add_status
+}
+
+# Remove listed packages in REMOVE_PACKAGES
+function remove_listed_packages() {
+  do_once || return
+
+  log_function $@
+
+  if [ "$REMOVE_PACKAGES" ]; then
+    log INFO "Removing packages: ${REMOVE_PACKAGES}"
+    yum remove -y $REMOVE_PACKAGES
+  else
+    log INFO "No packages listed in REMOVE_PACKAGES to remove."
   fi
   add_status
 }
@@ -425,6 +509,36 @@ function setup_security_updates() {
 
 }
 
+# Setup the kernel livepatch service.
+# Patches are installed through the existing cron-based yum security updates
+function setup_kernel_livepatch() {
+  do_once || return
+  log_function $@
+
+  if [ "${OSTYPE}" == 'centos7' ] || [ "${OSTYPE}" == 'centos8' ]; then
+    log INFO "No server build configuration available for kernel livepatch on Centos"
+    return
+  fi
+
+  if [ "${OSTYPE}" == 'amazonlinux2' ]; then
+    yum install -y binutils
+    yum install -y yum-plugin-kernel-livepatch
+    yum kernel-livepatch enable -y
+    yum install -y kpatch-runtime
+    yum update -y kpatch-runtime
+    systemctl enable kpatch.service
+    amazon-linux-extras enable livepatch
+    yum update -y --security
+  fi
+
+  if [ "$(service_not_running kpatch.service)" ]; then
+    log ERROR "Failed to setup kernel livepatch"
+    return 1
+  fi
+
+  add_status
+}
+
 # Set the server timezone for end-user boxes such as remote desktops
 # For example:
 #   set_server_timezone "America/New_York"
@@ -457,8 +571,9 @@ function get_source() {
 
   if [ -f "${script_file}" ] && [ "${no_reload}" ]; then
     log INFO "Not reloading source. Already exists and no_reload specified"
-  # else
-  #  aws s3 cp --only-show-errors s3://${SERVICE_ASSETS_BUCKET}/scripts/${script_file} ${script_file}
+  else
+    echo "Getting source from s3://${SERVICE_ASSETS_BUCKET}/scripts/${script_file}" >&2
+    # aws s3 cp --only-show-errors s3://${SERVICE_ASSETS_BUCKET}/scripts/${script_file} ${script_file}
   fi
 
   source ${script_file}
@@ -596,8 +711,7 @@ function init_templates() {
 
   rm -rf ${TEMPLATES_DIR}
   mkdir -p ${TEMPLATES_DIR}
-  # aws s3 cp s3://${SERVICE_ASSETS_BUCKET}/templates/${box}/${group}/ ${TEMPLATES_DIR}/${group}/ --recursive
-  \cp -rf ${SETUP_DIR}/box_templates/${box}/${group}/ ${TEMPLATES_DIR}/${group}/
+  aws s3 cp s3://${SERVICE_ASSETS_BUCKET}/templates/${box}/${group}/ ${TEMPLATES_DIR}/${group}/ --recursive
 }
 
 # Use a template to make a server file
@@ -917,8 +1031,8 @@ function on_start() {
 
   source_env_builds
   os_specific_setup
-  set_box_store
   essential_setup
+  set_box_store
   get_source user_functions.sh no_reload
 
   # Check RPM DB and cleanup if necessary
@@ -955,6 +1069,11 @@ function on_exit() {
 # sourced. This allows box specific functions to be run
 # every time the common_functions script is sourced.
 function source_env_builds() {
+  if [ ! -f ${ENV_SOURCE} ]; then
+    log INFO "ENV_SOURCE '${ENV_SOURCE}' does not exist yet"
+    return
+  fi
+
   source ${ENV_SOURCE}
   if [ -f ${SETUP_DIR}/env_build_*.sh ]; then
     for f in $(ls ${SETUP_DIR}/env_build_*.sh); do
@@ -1012,6 +1131,13 @@ function essential_setup() {
 
   yum install -y gettext || echo 'already installed gettext for envsubst'
   yum install -y htop iotop || echo 'already installed htop'
+
+  yum upgrade -y
+  install_epel_release
+  yum install -y nano htop unzip wget iftop psmisc yum-plugin-versionlock
+
+  amazon-linux-extras install -y epel
+  yum install -y amazon-efs-utils
 
   if [ ! -f "${ENV_SOURCE}" ]; then
     save_env
