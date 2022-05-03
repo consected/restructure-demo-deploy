@@ -488,24 +488,24 @@ function setup_firewall() {
 function setup_security_updates() {
   do_once || return
   log_function $@
-  if [ "${OSTYPE}" == 'centos7' ] || [ "${OSTYPE}" == 'centos8' ]; then
+  # if [ "${OSTYPE}" == 'centos7' ] || [ "${OSTYPE}" == 'centos8' ]; then
 
-    yum -y install yum-cron
-    systemctl start yum-cron
-    systemctl enable yum-cron
-    sed -i -E 's/^update_cmd =.+/update_cmd = security/g' ${YUM_CRON_CONF}
-    sed -i -E 's/^update_messages =.+/update_messages = yes/g' ${YUM_CRON_CONF}
-    sed -i -E 's/^download_updates =.+/download_updates = yes/g' ${YUM_CRON_CONF}
-    sed -i -E 's/^apply_updates =.+/apply_updates = yes/g' ${YUM_CRON_CONF}
-    sed -i -E 's/^emit_via =.+/emit_via = email/g' ${YUM_CRON_CONF}
-    sed -i -E "s/^email_from =.+/email_from = root@${HOSTNAME}/g" ${YUM_CRON_CONF}
-    sed -i -E "s/^email_to =.+/email_to = ${ADMIN_EMAIL}/g" ${YUM_CRON_CONF}
-    add_status
-    systemctl restart yum-cron
+  yum -y install yum-cron
+  systemctl start yum-cron
+  systemctl enable yum-cron
+  sed -i -E 's/^update_cmd =.+/update_cmd = security/g' ${YUM_CRON_CONF}
+  sed -i -E 's/^update_messages =.+/update_messages = yes/g' ${YUM_CRON_CONF}
+  sed -i -E 's/^download_updates =.+/download_updates = yes/g' ${YUM_CRON_CONF}
+  sed -i -E 's/^apply_updates =.+/apply_updates = yes/g' ${YUM_CRON_CONF}
+  sed -i -E 's/^emit_via =.+/emit_via = email/g' ${YUM_CRON_CONF}
+  sed -i -E "s/^email_from =.+/email_from = root@${HOSTNAME}/g" ${YUM_CRON_CONF}
+  sed -i -E "s/^email_to =.+/email_to = ${ADMIN_EMAIL}/g" ${YUM_CRON_CONF}
+  add_status
+  systemctl restart yum-cron
 
-  else
-    log INFO "${FUNCNAME[0]}($@) - Doing nothing, since this is not a Centos box"
-  fi
+  # else
+  #   log INFO "${FUNCNAME[0]}($@) - Doing nothing, since this is not a Centos box"
+  # fi
 
 }
 
