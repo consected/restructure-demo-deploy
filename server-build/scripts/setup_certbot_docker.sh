@@ -1,5 +1,7 @@
 #!/bin/bash
 CRON_DIR=/etc/cron.d
+CERTBOT_FLAG=/root/setup/status_certbot_running-${BOX_NAME}
+DEFAULT_IP=$(ip route get 1.1.1.1 | grep -oP 'src \K\S+')
 
 function setup_certbot_docker() {
   do_once || return
@@ -28,6 +30,14 @@ function certbot_docker_refresher() {
   box_name=${BOX_NAME} SERVICE_ASSETS_BUCKET=${SERVICE_ASSETS_BUCKET} INTERNAL_HOSTNAME=${INTERNAL_HOSTNAME} EXTERNAL_HOSTNAME=${EXTERNAL_HOSTNAME} use_template certbot_docker ${CRON_DIR}/refreshcerts
 }
 
+# Check our standard server certificate
+function check_certificate_valid() {
+  if openssl x509 -checkend 604800 -noout -in /etc/pki/tls/certs/server.crt; then
+    local res=valid
+  fi
+  echo ${res}
+}
+
 # Use environment variable FORCE_REISSUE=true to force the reissue even if certs appear to have a valid date
 function certbot_issue_certificate() {
   log_function $@
@@ -35,6 +45,11 @@ function certbot_issue_certificate() {
   local INT_DOMAIN=$1
   local EXT_DOMAIN=$2
   local extra_args=$3
+
+  if [ ! "${INT_DOMAIN}" ] || [ ! "${BOX_NAME}" ]; then
+    log ERROR "Environment not setup correctly: ${INT_DOMAIN} & ${BOX_NAME}"
+    exit 10
+  fi
 
   local docker_was_inactive=$(systemctl is-active docker | grep "inactive")
 
@@ -44,19 +59,28 @@ function certbot_issue_certificate() {
     local ext_domain_flag="--domains ${EXT_DOMAIN}"
   fi
 
+  lock_certbot
+
   get_certs_from_server_store
 
   local old_certs=$(find /etc/pki/tls/certs/ -name 'server.*' -mtime +35)
 
-  if [ ! -e /etc/pki/tls/certs/server.key ] || [ ! -z "$old_certs" ] || [ "$FORCE_REISSUE" == 'true' ]; then
+  if [ ! -e /etc/pki/tls/certs/server.key ] || [ ! -z "$old_certs" ] || [ "${FORCE_REISSUE}" == 'true' ] || [ "$(check_certificate_valid)" != 'valid' ]; then
 
     log INFO "Reissue certificates"
+    log INFO "key file does not exist? $([ ! -e /etc/pki/tls/certs/server.key ] && echo 'does not exist' || echo 'exists')"
+    log INFO "Certificate expiration: $(openssl x509 -enddate -noout -in /etc/pki/tls/certs/server.crt)"
+    log INFO "old certs: ${old_certs}"
+    log INFO "Checking for --domains ${INT_DOMAIN} ${ext_domain_flag}"
 
     # Ensure docker is in a good state, and iptables are set
     systemctl restart docker
 
     rm -rf /etc/letsencrypt/live/*
     rm -rf /etc/letsencrypt/archive/*
+
+    # Another check on the lock
+    lock_certbot
 
     docker run --rm --name dns-route53 \
       -v "/var/log/letsencrypt:/var/log/letsencrypt" \
@@ -67,7 +91,7 @@ function certbot_issue_certificate() {
       --dns-route53 \
       --email phil.ayres@consected.com \
       --domains ${INT_DOMAIN} ${ext_domain_flag} \
-      --dns-route53-propagation-seconds	20 \
+      --dns-route53-propagation-seconds 20 \
       --agree-tos \
       --keep-until-expiring \
       --force-renewal
@@ -79,6 +103,12 @@ function certbot_issue_certificate() {
       ln -s /etc/letsencrypt/live/${INT_DOMAIN}*/fullchain.pem /etc/pki/tls/certs/server.crt
       save_certs_to_server_store
       certbot_issued_reboot_services
+
+      if [ "$(check_certificate_valid)" == 'valid' ]; then
+        log INFO "Certificate not expired: $(openssl x509 -enddate -noout -in /etc/pki/tls/certs/server.crt)"
+      else
+        log ERROR "Certificate will expire within 7 days, or has already expired: $(openssl x509 -enddate -noout -in /etc/pki/tls/certs/server.crt)"
+      fi
     else
       log ERROR "New certificates not found"
     fi
@@ -87,9 +117,34 @@ function certbot_issue_certificate() {
       # Docker was previously inactive. Stop it again
       systemctl stop docker
     fi
+
   else
     log INFO "Not reissuing certificates yet"
   fi
+
+  echo '' > ${CERTBOT_FLAG}
+  save_to_box_store ${CERTBOT_FLAG}
+}
+
+function lock_certbot() {
+  log_function $@
+
+  get_from_box_store ${CERTBOT_FLAG}
+
+  if [ -f ${CERTBOT_FLAG} ]; then
+    # Check certbot isn't running on another server
+    local certbot_running_on=$(cat ${CERTBOT_FLAG})
+    while [ "${certbot_running_on}" ] && [ "${certbot_running_on}" != ${DEFAULT_IP} ]; do
+      log INFO "Waiting for another certbot to finish: ${certbot_running_on}"
+      get_from_box_store ${CERTBOT_FLAG}
+      certbot_running_on=$(cat ${CERTBOT_FLAG})
+      sleep 30
+    done
+  fi
+
+  echo ${DEFAULT_IP} > ${CERTBOT_FLAG}
+  save_to_box_store ${CERTBOT_FLAG} any-age
+
 }
 
 function certbot_issued_reboot_services() {
